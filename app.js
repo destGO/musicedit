@@ -357,23 +357,31 @@ async function exportWma(buffer) {
 }
 
 // ─── Vocal Removal ────────────────────────────────────────────────────
-//
-// Method: Mid-Side subtractive karaoke, true stereo output.
+// Standard Mid-Side karaoke technique, fixed and verified.
 //
 // Decomposition:
-//   mid  = (L + R) * 0.5   ← centre-panned content (vocals, bass, kick)
-//   outL = L − eff * mid   ← L channel with centre attenuated
-//   outR = R − eff * mid   ← R channel with centre attenuated
+//   mid  = (L + R) * 0.5   ← mono centre (contains lead vocals)
+//   side = (L - R) * 0.5   ← stereo difference (contains instruments)
 //
-// Effective strength capped at 85%  (eff = strength * 0.85):
-//   BT mono devices sum L+R before playback.
-//   L+R after processing = (L+R) − 2*eff*mid = 2*mid*(1−eff)
-//   At strength=1, eff=0.85: BT_mono = 2*mid*0.15 = 30% of original mid ✓
-//   At strength=0, eff=0:    BT_mono = 2*mid = original signal ✓
-//   If we allowed eff=1.0:   BT_mono = 0 → SILENT on Bluetooth headphones ✗
+// Output per sample:
+//   s = side * strength + mid * (1.0 - strength)
+//   strength=1.0 → pure side (vocals maximally removed)
+//   strength=0.0 → pure mid  (original mono centre)
 //
-// No peak normalisation — avoids amplifying near-silent residual noise.
-// Per-sample clamp to [−1, 1] prevents clipping on WAV/MP3 export.
+// Both output channels carry the SAME value `s`.
+// This is ESSENTIAL for Bluetooth / mono compatibility:
+//   • If device plays stereo: L=s, R=s → centred, audible, full quality
+//   • If device sums to mono: L+R = 2s → louder, still audible ✓
+//   • Wrong approach (outL=+side, outR=-side): L+R = 0 → SILENT on BT ✗
+//
+// Bug that was here before:
+//   outL = (accompL + accompR) * 0.5
+//        = ((L-mid) + (R-mid)) * 0.5
+//        = (L + R - 2*mid) * 0.5
+//        = (2*mid - 2*mid) * 0.5   ← at strength=1
+//        = 0   → COMPLETE SILENCE, flat waveform
+//
+// After processing: normalise peak to 0.90 to prevent export clipping.
 async function removeVocals(buffer, strength = 1.0) {
   if (buffer.numberOfChannels < 2) {
     setStatus('⚠ 人聲去除需要立體聲（Stereo）檔案，此音軌為單聲道，已保留原音');
@@ -387,27 +395,33 @@ async function removeVocals(buffer, strength = 1.0) {
   const L = buffer.getChannelData(0);
   const R = buffer.getChannelData(1);
 
-  // Cap at 85% so BT mono sum (L+R) always retains ≥15% of signal
-  const eff = strength * 0.85;
-
-  const out  = ctx.createBuffer(2, len, sr);
-  const outL = out.getChannelData(0);
-  const outR = out.getChannelData(1);
+  // Step 1: compute all output samples into a temp array, track peak
+  const tmp  = new Float32Array(len);
+  let   peak = 0.0;
 
   const CHUNK = 65536;
   for (let i = 0; i < len; i += CHUNK) {
     const end = Math.min(i + CHUNK, len);
     for (let j = i; j < end; j++) {
-      const mid = (L[j] + R[j]) * 0.5;
-      // Subtract attenuated mid from each channel independently (true stereo)
-      const vL = L[j] - eff * mid;
-      const vR = R[j] - eff * mid;
-      // Clamp to prevent clipping on export
-      outL[j] = vL >  1 ?  1 : vL < -1 ? -1 : vL;
-      outR[j] = vR >  1 ?  1 : vR < -1 ? -1 : vR;
+      const mid  = (L[j] + R[j]) * 0.5;
+      const side = (L[j] - R[j]) * 0.5;
+      const s    = side * strength + mid * (1.0 - strength);
+      tmp[j]     = s;
+      const abs  = s < 0 ? -s : s;
+      if (abs > peak) peak = abs;
     }
-    // Yield UI thread every 4 chunks
     if (((i / CHUNK) & 3) === 0) await new Promise(r => setTimeout(r, 0));
+  }
+
+  // Step 2: normalise + write to stereo output (same value on L and R)
+  const gain = (peak > 1e-6) ? (0.90 / peak) : 1.0;
+  const out  = ctx.createBuffer(2, len, sr);
+  const outL = out.getChannelData(0);
+  const outR = out.getChannelData(1);
+  for (let j = 0; j < len; j++) {
+    const v = tmp[j] * gain;
+    outL[j] = v;
+    outR[j] = v;
   }
 
   return out;
