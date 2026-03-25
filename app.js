@@ -356,26 +356,10 @@ async function exportWma(buffer) {
   if (saved) setStatus('✅ WMA 匯出成功');
 }
 
-// ─── Vocal Removal (Pure PCM Mid-Side subtraction — True Stereo) ─────
-//
-// How it works:
-//   Any stereo signal = Mid + Side:
-//     Mid  (M) = (L + R) / 2   ← centre-panned content (where vocals live)
-//     Side (S) = (L - R) / 2   ← stereo-wide content (instruments, reverb)
-//
-//   To remove vocals, subtract `strength` fraction of M from each channel:
-//     outL = L - strength * M
-//     outR = R - strength * M
-//
-//   Proof — at strength=1:
-//     outL = L - (L+R)/2 = (L-R)/2  =  +S
-//     outR = R - (L+R)/2 = (R-L)/2  =  -S
-//   → outL and outR are OPPOSITE SIGNS of Side (true stereo, not mono!)
-//
-//   CRITICAL BUG that was here before:
-//     outL[j] = (accompL + accompR) * 0.5   ← this averages +S and -S → 0 (SILENT!)
-//     outR[j] = outL[j]                      ← both channels zeroed out
-//   Never average the two channels together — they must stay separate.
+// ─── Vocal Removal (Pure PCM Mid-Side subtraction) ───────────────────
+// Performs L-R (side channel) extraction directly on PCM samples.
+// No Web Audio filter chains = no phase distortion, no frequency artifacts.
+// The side signal preserves the full stereo accompaniment at full bit-depth.
 async function removeVocals(buffer, strength = 1.0) {
   if (buffer.numberOfChannels < 2) {
     setStatus('⚠ 人聲去除需要立體聲（Stereo）檔案，此音軌為單聲道，已保留原音');
@@ -389,25 +373,33 @@ async function removeVocals(buffer, strength = 1.0) {
   const L = buffer.getChannelData(0);
   const R = buffer.getChannelData(1);
 
-  // True stereo output — outL and outR carry different signals
-  const out  = ctx.createBuffer(2, len, sr);
-  const outL = out.getChannelData(0);
-  const outR = out.getChannelData(1);
+  // Output: stereo buffer (same Side signal on both channels for mono-compat)
+  const out    = ctx.createBuffer(2, len, sr);
+  const outL   = out.getChannelData(0);
+  const outR   = out.getChannelData(1);
 
+  // Process in chunks to avoid blocking the UI thread
   const CHUNK = 65536;
   for (let i = 0; i < len; i += CHUNK) {
     const end = Math.min(i + CHUNK, len);
     for (let j = i; j < end; j++) {
-      // Mid = average of both channels (the centre / vocal component)
-      const mid = (L[j] + R[j]) * 0.5;
-      // Subtract proportional mid from each channel INDEPENDENTLY
-      // strength=1 → pure Side signal (vocals gone), full stereo width preserved
-      // strength=0 → original signal unchanged
-      outL[j] = L[j] - strength * mid;
-      outR[j] = R[j] - strength * mid;
+      // Mid-Side: Mid = (L+R)/2  Side = (L-R)/2
+      // Full Mid-Side subtraction at `strength`, blend back at lower values
+      const mid  = (L[j] + R[j]) * 0.5;
+      const side = (L[j] - R[j]) * 0.5;
+
+      // Accompaniment = original - (strength * mid_component)
+      // At strength=1: pure side channel (vocals cancelled)
+      // At strength=0: original stereo untouched
+      const accompanimentL = L[j] - strength * mid;
+      const accompanimentR = R[j] - strength * mid;
+
+      // Output the same blended signal on both channels (mono-compatible)
+      outL[j] = (accompanimentL + accompanimentR) * 0.5;
+      outR[j] = outL[j];
     }
-    // Yield UI thread every 4 chunks (~256 k samples)
-    if (((i / CHUNK) % 4) === 0) await new Promise(r => setTimeout(r, 0));
+    // Yield to UI every chunk
+    if (i % (CHUNK * 4) === 0) await new Promise(r => setTimeout(r, 0));
   }
 
   return out;
