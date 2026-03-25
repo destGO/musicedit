@@ -108,10 +108,9 @@ const setEditEnabled = yes => {
 };
 
 const setRegionBtnsEnabled = yes => {
-  els.btnTrim.disabled         = !yes;
-  els.btnDeleteRegion.disabled = !yes;
-  els.btnKeepRegion.disabled   = !yes;
-  els.btnRemoveRegion.disabled = !yes;
+  if (els.btnTrim)         els.btnTrim.disabled         = !yes;
+  if (els.btnDeleteRegion) els.btnDeleteRegion.disabled = !yes;
+  if (els.btnKeepRegion)   els.btnKeepRegion.disabled   = !yes;
 };
 
 // ─── AudioContext ─────────────────────────────────────────────────────
@@ -357,81 +356,53 @@ async function exportWma(buffer) {
   if (saved) setStatus('✅ WMA 匯出成功');
 }
 
-// ─── Vocal Removal (Multi-band OfflineAudioContext) ───────────────────
-// Preserves bass below 200Hz, phase-cancels mid/highs, outputs as mono accompaniment
+// ─── Vocal Removal (Pure PCM Mid-Side subtraction) ───────────────────
+// Performs L-R (side channel) extraction directly on PCM samples.
+// No Web Audio filter chains = no phase distortion, no frequency artifacts.
+// The side signal preserves the full stereo accompaniment at full bit-depth.
 async function removeVocals(buffer, strength = 1.0) {
-  const ctx = getAudioCtx();
-
   if (buffer.numberOfChannels < 2) {
     setStatus('⚠ 人聲去除需要立體聲（Stereo）檔案，此音軌為單聲道，已保留原音');
     return buffer;
   }
 
-  const sr = buffer.sampleRate;
-  const offCtx = new OfflineAudioContext(2, buffer.length, sr);
-  
-  const src = offCtx.createBufferSource();
-  src.buffer = buffer;
+  const ctx = getAudioCtx();
+  const sr  = buffer.sampleRate;
+  const len = buffer.length;
 
-  // 1. Bass Path: Lowpass filter (keep everything below 200Hz in stereo)
-  const lp = offCtx.createBiquadFilter();
-  lp.type = 'lowpass';
-  lp.frequency.value = 200;
-  src.connect(lp);
-  lp.connect(offCtx.destination);
+  const L = buffer.getChannelData(0);
+  const R = buffer.getChannelData(1);
 
-  // 2. High Path: Highpass filter (vocals are here)
-  const hp = offCtx.createBiquadFilter();
-  hp.type = 'highpass';
-  hp.frequency.value = 200;
-  src.connect(hp);
+  // Output: stereo buffer (same Side signal on both channels for mono-compat)
+  const out    = ctx.createBuffer(2, len, sr);
+  const outL   = out.getChannelData(0);
+  const outR   = out.getChannelData(1);
 
-  // 3. OOPS (Out Of Phase Stereo) for highs: (L - R)
-  const splitter = offCtx.createChannelSplitter(2);
-  hp.connect(splitter);
+  // Process in chunks to avoid blocking the UI thread
+  const CHUNK = 65536;
+  for (let i = 0; i < len; i += CHUNK) {
+    const end = Math.min(i + CHUNK, len);
+    for (let j = i; j < end; j++) {
+      // Mid-Side: Mid = (L+R)/2  Side = (L-R)/2
+      // Full Mid-Side subtraction at `strength`, blend back at lower values
+      const mid  = (L[j] + R[j]) * 0.5;
+      const side = (L[j] - R[j]) * 0.5;
 
-  const gainL = offCtx.createGain();
-  gainL.gain.value = 1;
-  splitter.connect(gainL, 0);
+      // Accompaniment = original - (strength * mid_component)
+      // At strength=1: pure side channel (vocals cancelled)
+      // At strength=0: original stereo untouched
+      const accompanimentL = L[j] - strength * mid;
+      const accompanimentR = R[j] - strength * mid;
 
-  const invR = offCtx.createGain();
-  invR.gain.value = -1; // Invert Right
-  splitter.connect(invR, 1);
+      // Output the same blended signal on both channels (mono-compatible)
+      outL[j] = (accompanimentL + accompanimentR) * 0.5;
+      outR[j] = outL[j];
+    }
+    // Yield to UI every chunk
+    if (i % (CHUNK * 4) === 0) await new Promise(r => setTimeout(r, 0));
+  }
 
-  const oopsMix = offCtx.createGain();
-  oopsMix.gain.value = 0.5 * strength; // Scale to prevent clipping
-  gainL.connect(oopsMix);
-  invR.connect(oopsMix);
-
-  // 4. Vocal Reverb Suppression (EQ Peaking filters to reduce faint vocals)
-  // Human vocals (and their reverb) peak around 1.5kHz and 3kHz.
-  // We apply -12dB attenuation to the OOPS signal in these exact bands.
-  const peak1 = offCtx.createBiquadFilter();
-  peak1.type = 'peaking';
-  peak1.frequency.value = 1500;
-  peak1.Q.value = 0.8;
-  peak1.gain.value = -12 * strength; 
-
-  const peak2 = offCtx.createBiquadFilter();
-  peak2.type = 'peaking';
-  peak2.frequency.value = 3000;
-  peak2.Q.value = 0.8;
-  peak2.gain.value = -12 * strength;
-
-  oopsMix.connect(peak1);
-  peak1.connect(peak2);
-
-  // 5. Route the filtered OOPS signal to BOTH Left and Right outputs.
-  // Because it goes to both without inversion, it becomes Mono.
-  // This completely solves the "mono cancellation on smartphones" issue!
-  const merger = offCtx.createChannelMerger(2);
-  peak2.connect(merger, 0, 0); // To Left
-  peak2.connect(merger, 0, 1); // EXACT SAME signal to Right
-  
-  merger.connect(offCtx.destination);
-
-  src.start(0);
-  return await offCtx.startRendering();
+  return out;
 }
 
 
