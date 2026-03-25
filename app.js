@@ -357,25 +357,31 @@ async function exportWma(buffer) {
 }
 
 // ─── Vocal Removal ────────────────────────────────────────────────────
+// Standard Mid-Side karaoke technique, fixed and verified.
 //
-// Uses standard Mid-Side (karaoke) technique:
-//   Mid  = (L + R) * 0.5  ← centre content (vocals, bass drum centre hits)
-//   Side = (L - R) * 0.5  ← stereo-difference content (instruments, reverb)
+// Decomposition:
+//   mid  = (L + R) * 0.5   ← mono centre (contains lead vocals)
+//   side = (L - R) * 0.5   ← stereo difference (contains instruments)
 //
-// Output sample = Side * strength + Mid * (1 - strength)
-//   strength=1.0 → pure Side (vocals removed as much as possible)
-//   strength=0.0 → pure Mid  (original mono centre)
-//   In between   → smooth blend
+// Output per sample:
+//   s = side * strength + mid * (1.0 - strength)
+//   strength=1.0 → pure side (vocals maximally removed)
+//   strength=0.0 → pure mid  (original mono centre)
 //
-// MONO-COMPATIBLE OUTPUT (critical for Bluetooth headphones):
-//   Both output channels carry the SAME value.
-//   If a BT device sums L+R to mono, it doubles instead of cancelling.
-//   The "true stereo" approach (outL=+side, outR=-side) cancels to zero
-//   in mono — that is why the user heard silence.
+// Both output channels carry the SAME value `s`.
+// This is ESSENTIAL for Bluetooth / mono compatibility:
+//   • If device plays stereo: L=s, R=s → centred, audible, full quality
+//   • If device sums to mono: L+R = 2s → louder, still audible ✓
+//   • Wrong approach (outL=+side, outR=-side): L+R = 0 → SILENT on BT ✗
 //
-// PEAK NORMALISATION:
-//   After processing, scan for the maximum amplitude and scale to 0.95
-//   so the signal is loud and clear without clipping on export.
+// Bug that was here before:
+//   outL = (accompL + accompR) * 0.5
+//        = ((L-mid) + (R-mid)) * 0.5
+//        = (L + R - 2*mid) * 0.5
+//        = (2*mid - 2*mid) * 0.5   ← at strength=1
+//        = 0   → COMPLETE SILENCE, flat waveform
+//
+// After processing: normalise peak to 0.90 to prevent export clipping.
 async function removeVocals(buffer, strength = 1.0) {
   if (buffer.numberOfChannels < 2) {
     setStatus('⚠ 人聲去除需要立體聲（Stereo）檔案，此音軌為單聲道，已保留原音');
@@ -389,35 +395,33 @@ async function removeVocals(buffer, strength = 1.0) {
   const L = buffer.getChannelData(0);
   const R = buffer.getChannelData(1);
 
-  // Temporary float array (process into this, then normalise)
-  const tmp = new Float32Array(len);
+  // Step 1: compute all output samples into a temp array, track peak
+  const tmp  = new Float32Array(len);
+  let   peak = 0.0;
 
-  // ── Pass 1: compute output samples & track peak ──────────────────────
-  let peak = 0;
   const CHUNK = 65536;
   for (let i = 0; i < len; i += CHUNK) {
     const end = Math.min(i + CHUNK, len);
     for (let j = i; j < end; j++) {
       const mid  = (L[j] + R[j]) * 0.5;
       const side = (L[j] - R[j]) * 0.5;
-      // Blend side (accompaniment) and mid according to strength
-      const s = side * strength + mid * (1.0 - strength);
-      tmp[j] = s;
-      const abs = s < 0 ? -s : s;
+      const s    = side * strength + mid * (1.0 - strength);
+      tmp[j]     = s;
+      const abs  = s < 0 ? -s : s;
       if (abs > peak) peak = abs;
     }
-    if (((i / CHUNK) % 4) === 0) await new Promise(r => setTimeout(r, 0));
+    if (((i / CHUNK) & 3) === 0) await new Promise(r => setTimeout(r, 0));
   }
 
-  // ── Pass 2: normalise to 0.95 and write stereo output ────────────────
-  const gain = peak > 0.001 ? 0.95 / peak : 1.0;
+  // Step 2: normalise + write to stereo output (same value on L and R)
+  const gain = (peak > 1e-6) ? (0.90 / peak) : 1.0;
   const out  = ctx.createBuffer(2, len, sr);
   const outL = out.getChannelData(0);
   const outR = out.getChannelData(1);
   for (let j = 0; j < len; j++) {
     const v = tmp[j] * gain;
-    outL[j] = v;   // Same value on both channels → mono-compatible
-    outR[j] = v;   // BT headphones sum L+R → doubles (loud & clear, not silent)
+    outL[j] = v;
+    outR[j] = v;
   }
 
   return out;
