@@ -357,9 +357,22 @@ async function exportWma(buffer) {
 }
 
 // ─── Vocal Removal (Pure PCM Mid-Side subtraction) ───────────────────
-// Performs L-R (side channel) extraction directly on PCM samples.
-// No Web Audio filter chains = no phase distortion, no frequency artifacts.
-// The side signal preserves the full stereo accompaniment at full bit-depth.
+// ─── Vocal Removal — True Stereo Mid-Side PCM subtraction ────────────
+//
+// Theory:
+//   Mid  (M) = (L + R) / 2  → centre content  ← where vocals live
+//   Side (S) = (L - R) / 2  → stereo width     ← instruments, reverb tails
+//
+//   Vocal removal: reduce M by `strength`, keep S intact:
+//     L_out = L - strength * M
+//     R_out = R - strength * M
+//
+//   At strength=1: pure stereo side signal (vocals fully cancelled)
+//   At strength=0: original untouched
+//
+//   IMPORTANT: outL and outR must remain DIFFERENT (they carry ±S).
+//   Collapsing them to the same value kills all stereo imaging and
+//   high-frequency air — that is what causes the "muffled" sound.
 async function removeVocals(buffer, strength = 1.0) {
   if (buffer.numberOfChannels < 2) {
     setStatus('⚠ 人聲去除需要立體聲（Stereo）檔案，此音軌為單聲道，已保留原音');
@@ -373,33 +386,20 @@ async function removeVocals(buffer, strength = 1.0) {
   const L = buffer.getChannelData(0);
   const R = buffer.getChannelData(1);
 
-  // Output: stereo buffer (same Side signal on both channels for mono-compat)
-  const out    = ctx.createBuffer(2, len, sr);
-  const outL   = out.getChannelData(0);
-  const outR   = out.getChannelData(1);
+  // True stereo output — outL !== outR
+  const out  = ctx.createBuffer(2, len, sr);
+  const outL = out.getChannelData(0);
+  const outR = out.getChannelData(1);
 
-  // Process in chunks to avoid blocking the UI thread
   const CHUNK = 65536;
   for (let i = 0; i < len; i += CHUNK) {
     const end = Math.min(i + CHUNK, len);
     for (let j = i; j < end; j++) {
-      // Mid-Side: Mid = (L+R)/2  Side = (L-R)/2
-      // Full Mid-Side subtraction at `strength`, blend back at lower values
-      const mid  = (L[j] + R[j]) * 0.5;
-      const side = (L[j] - R[j]) * 0.5;
-
-      // Accompaniment = original - (strength * mid_component)
-      // At strength=1: pure side channel (vocals cancelled)
-      // At strength=0: original stereo untouched
-      const accompanimentL = L[j] - strength * mid;
-      const accompanimentR = R[j] - strength * mid;
-
-      // Output the same blended signal on both channels (mono-compatible)
-      outL[j] = (accompanimentL + accompanimentR) * 0.5;
-      outR[j] = outL[j];
+      const mid = (L[j] + R[j]) * 0.5;
+      outL[j] = L[j] - strength * mid;
+      outR[j] = R[j] - strength * mid;
     }
-    // Yield to UI every chunk
-    if (i % (CHUNK * 4) === 0) await new Promise(r => setTimeout(r, 0));
+    if (((i / CHUNK) % 4) === 0) await new Promise(r => setTimeout(r, 0));
   }
 
   return out;
