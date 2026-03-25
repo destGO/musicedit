@@ -356,23 +356,26 @@ async function exportWma(buffer) {
   if (saved) setStatus('✅ WMA 匯出成功');
 }
 
-// ─── Vocal Removal (Pure PCM Mid-Side subtraction) ───────────────────
-// ─── Vocal Removal — True Stereo Mid-Side PCM subtraction ────────────
+// ─── Vocal Removal (Pure PCM Mid-Side subtraction — True Stereo) ─────
 //
-// Theory:
-//   Mid  (M) = (L + R) / 2  → centre content  ← where vocals live
-//   Side (S) = (L - R) / 2  → stereo width     ← instruments, reverb tails
+// How it works:
+//   Any stereo signal = Mid + Side:
+//     Mid  (M) = (L + R) / 2   ← centre-panned content (where vocals live)
+//     Side (S) = (L - R) / 2   ← stereo-wide content (instruments, reverb)
 //
-//   Vocal removal: reduce M by `strength`, keep S intact:
-//     L_out = L - strength * M
-//     R_out = R - strength * M
+//   To remove vocals, subtract `strength` fraction of M from each channel:
+//     outL = L - strength * M
+//     outR = R - strength * M
 //
-//   At strength=1: pure stereo side signal (vocals fully cancelled)
-//   At strength=0: original untouched
+//   Proof — at strength=1:
+//     outL = L - (L+R)/2 = (L-R)/2  =  +S
+//     outR = R - (L+R)/2 = (R-L)/2  =  -S
+//   → outL and outR are OPPOSITE SIGNS of Side (true stereo, not mono!)
 //
-//   IMPORTANT: outL and outR must remain DIFFERENT (they carry ±S).
-//   Collapsing them to the same value kills all stereo imaging and
-//   high-frequency air — that is what causes the "muffled" sound.
+//   CRITICAL BUG that was here before:
+//     outL[j] = (accompL + accompR) * 0.5   ← this averages +S and -S → 0 (SILENT!)
+//     outR[j] = outL[j]                      ← both channels zeroed out
+//   Never average the two channels together — they must stay separate.
 async function removeVocals(buffer, strength = 1.0) {
   if (buffer.numberOfChannels < 2) {
     setStatus('⚠ 人聲去除需要立體聲（Stereo）檔案，此音軌為單聲道，已保留原音');
@@ -386,7 +389,7 @@ async function removeVocals(buffer, strength = 1.0) {
   const L = buffer.getChannelData(0);
   const R = buffer.getChannelData(1);
 
-  // True stereo output — outL !== outR
+  // True stereo output — outL and outR carry different signals
   const out  = ctx.createBuffer(2, len, sr);
   const outL = out.getChannelData(0);
   const outR = out.getChannelData(1);
@@ -395,10 +398,15 @@ async function removeVocals(buffer, strength = 1.0) {
   for (let i = 0; i < len; i += CHUNK) {
     const end = Math.min(i + CHUNK, len);
     for (let j = i; j < end; j++) {
+      // Mid = average of both channels (the centre / vocal component)
       const mid = (L[j] + R[j]) * 0.5;
+      // Subtract proportional mid from each channel INDEPENDENTLY
+      // strength=1 → pure Side signal (vocals gone), full stereo width preserved
+      // strength=0 → original signal unchanged
       outL[j] = L[j] - strength * mid;
       outR[j] = R[j] - strength * mid;
     }
+    // Yield UI thread every 4 chunks (~256 k samples)
     if (((i / CHUNK) % 4) === 0) await new Promise(r => setTimeout(r, 0));
   }
 
