@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>音訊編輯器 — AudioCraft Pro</title>
+  <meta name="description" content="專業音訊編輯器：人聲去除、升降KEY、剪輯與合併 MP3 / WMA 音樂檔案" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ================= HEADER ================= -->
+  <header class="app-header">
+    <div class="header-brand">
+      <div class="brand-icon">🎚️</div>
+      <div class="brand-text">
+        <span class="brand-name">AudioCraft Pro</span>
+        <span class="brand-sub">專業音訊編輯器</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="btn-import" class="btn btn-primary" title="匯入 MP3 / WMA 檔案">
+        <span>📂</span> 匯入檔案
+      </button>
+      <button id="btn-export-wav" class="btn btn-success" title="匯出為 WAV（無損）" disabled>
+        <span>💾</span> 匯出 WAV
+      </button>
+      <button id="btn-export-mp3" class="btn btn-success" title="匯出為 MP3" disabled>
+        <span>💾</span> 匯出 MP3
+      </button>
+      <button id="btn-export-wma" class="btn btn-success" title="匯出為 WMA（需要 FFmpeg）" disabled>
+        <span>💾</span> 匯出 WMA
+      </button>
+    </div>
+    <input type="file" id="file-input" accept=".mp3,.wma" multiple style="display:none" />
+  </header>
+
+  <!-- ================= MAIN LAYOUT ================= -->
+  <main class="app-main">
+
+    <!-- LEFT: CLIP LIST -->
+    <aside class="clip-sidebar">
+      <div class="sidebar-header">
+        <h2>🎵 音軌清單</h2>
+        <button id="btn-merge" class="btn btn-sm btn-accent" disabled title="合併所有音軌">合併</button>
+      </div>
+      <div id="clip-list" class="clip-list">
+        <div class="empty-state">
+          <div class="empty-icon">🎼</div>
+          <p>尚無音軌</p>
+          <p class="empty-hint">點選「匯入檔案」<br/>或拖放音訊到此處</p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- CENTER: WAVEFORM + CONTROLS -->
+    <section class="editor-center">
+
+      <!-- WAVEFORM -->
+      <div class="waveform-container" id="waveform-drop-zone">
+        <div id="waveform-loading" class="waveform-loading" style="display:none">
+          <div class="spinner"></div>
+          <span id="loading-label">載入中...</span>
+        </div>
+        <div id="waveform"></div>
+        <div id="waveform-placeholder" class="waveform-placeholder">
+          <div class="drop-icon">🎵</div>
+          <p>拖放 MP3 / WMA 檔案至此處</p>
+          <p class="drop-hint">或點選上方「匯入檔案」按鈕</p>
+        </div>
+        <!-- Region info -->
+        <div id="region-info" class="region-info" style="display:none">
+          <span>✂️ 已選取區域：</span>
+          <span id="region-start">0.00s</span> — <span id="region-end">0.00s</span>
+          <button id="btn-trim" class="btn btn-sm btn-warn">剪輯選取區域</button>
+          <button id="btn-delete-region" class="btn btn-sm btn-danger">刪除選取區域</button>
+        </div>
+      </div>
+
+      <!-- TRANSPORT BAR -->
+      <div class="transport-bar">
+        <button id="btn-play" class="transport-btn play-btn" disabled>▶</button>
+        <button id="btn-stop" class="transport-btn" disabled>⏹</button>
+        <div class="time-display">
+          <span id="time-current">0:00.0</span>
+          <span class="time-sep">/</span>
+          <span id="time-total">0:00.0</span>
+        </div>
+        <div class="volume-row">
+          <span>🔊</span>
+          <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="0.8" />
+        </div>
+      </div>
+
+      <!-- ===== PROCESS PANELS ===== -->
+      <div class="panels-row">
+
+        <!-- VOCAL REMOVAL -->
+        <div class="panel panel-vocal">
+          <div class="panel-header">
+            <div class="panel-icon">🎤</div>
+            <div>
+              <div class="panel-title">人聲去除</div>
+              <div class="panel-desc">Mid-Side 相位消除法</div>
+            </div>
+            <label class="toggle-switch" title="即時套用人聲去除">
+              <input type="checkbox" id="toggle-vocal" />
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+          <div class="panel-body">
+            <div class="info-row">
+              <span class="badge badge-blue">立體聲</span>
+              <span class="badge-label">僅保留側音 (伴奏)</span>
+            </div>
+            <div class="vocal-strength-row">
+              <label>去除強度</label>
+              <input type="range" id="vocal-strength" min="0" max="1" step="0.01" value="1" />
+              <span id="vocal-strength-val">100%</span>
+            </div>
+            <button id="btn-apply-vocal" class="btn btn-block btn-accent" disabled>
+              🎙️ 套用人聲去除
+            </button>
+          </div>
+        </div>
+
+        <!-- PITCH SHIFT -->
+        <div class="panel panel-pitch">
+          <div class="panel-header">
+            <div class="panel-icon">🎹</div>
+            <div>
+              <div class="panel-title">升降 KEY</div>
+              <div class="panel-desc">半音為單位</div>
+            </div>
+            <label class="toggle-switch" title="即時套用變調">
+              <input type="checkbox" id="toggle-pitch" />
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+          <div class="panel-body">
+            <div class="pitch-display">
+              <button class="pitch-btn" id="pitch-down" disabled>−</button>
+              <div class="pitch-value-box">
+                <span id="pitch-value">0</span>
+                <span class="pitch-unit">半音</span>
+              </div>
+              <button class="pitch-btn" id="pitch-up" disabled>+</button>
+            </div>
+            <input type="range" id="pitch-slider" min="-12" max="12" step="1" value="0" disabled />
+            <div class="pitch-labels">
+              <span>−12</span><span>0</span><span>+12</span>
+            </div>
+            <button id="btn-apply-pitch" class="btn btn-block btn-accent" disabled>
+              🎵 套用變調
+            </button>
+          </div>
+        </div>
+
+        <!-- TRIM & MERGE -->
+        <div class="panel panel-trim">
+          <div class="panel-header">
+            <div class="panel-icon">✂️</div>
+            <div>
+              <div class="panel-title">剪輯 & 合併</div>
+              <div class="panel-desc">拖曳波形選取範圍</div>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="trim-hint">
+              <p>👉 <b>刀片切割模式</b>：點擊下方刀片按鈕後</p>
+              <ul style="text-align:left; font-size:13px; margin:4px 0 0 16px; color:var(--text-secondary)">
+                <li>在波形上<b>點一下</b>設定起點</li>
+                <li>再<b>點一下</b>設定終點</li>
+                <li>中段將<b>自動被刪除並合併前後段</b></li>
+              </ul>
+            </div>
+            <div class="trim-actions" style="gap:8px">
+              <button id="btn-blade-mode" class="btn btn-sm btn-danger" disabled>🔪 啟用刀片切割模式</button>
+              <div id="blade-hint" style="display:none; color:var(--warn); font-size:12px; text-align:center;">
+                狀態：等待點擊第一刀 (起點)...
+              </div>
+              <hr style="border-top:1px solid var(--border); width:100%; margin:4px 0;" />
+              <button id="btn-keep-region" class="btn btn-sm btn-success" disabled title="需先在波形上拖曳選取">✔ 只保留拖曳選取的區塊</button>
+              <button id="btn-split" class="btn btn-sm btn-accent" disabled>✂️ 在當前播放頭切成兩首</button>
+            </div>
+            <hr class="divider" />
+            <div class="merge-section">
+              <p class="merge-label">合併音軌清單中所有音軌</p>
+              <button id="btn-merge2" class="btn btn-block btn-success" disabled>🔗 合併所有音軌</button>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- end panels-row -->
+    </section>
+
+  </main>
+
+  <!-- ================= STATUS BAR ================= -->
+  <footer class="status-bar">
+    <span id="status-msg">就緒 — 請匯入音訊檔案開始編輯</span>
+    <div class="status-right">
+      <span id="file-info" class="file-info"></span>
+      <span class="version">v1.0.0</span>
+    </div>
+  </footer>
+
+  <!-- ================= FFMPEG LOADING OVERLAY (on-demand only) ================= -->
+  <div id="ffmpeg-overlay" class="ffmpeg-overlay" style="display:none">
+    <div class="ffmpeg-card">
+      <div class="spinner large"></div>
+      <h2>載入 FFmpeg 模組</h2>
+      <p id="ffmpeg-status-msg">正在下載 FFmpeg.wasm，僅需首次下載...</p>
+      <p class="ffmpeg-hint">用於 WMA 檔案處理（約 30MB），請稍等</p>
+      <div class="progress-bar-wrap"><div id="ffmpeg-progress" class="progress-bar-fill"></div></div>
+      <button id="btn-cancel-ffmpeg" class="btn btn-danger" style="margin-top:8px">取消</button>
+    </div>
+  </div>
+
+  <!-- ================= SCRIPTS ================= -->
+  <!-- lamejs: pure-JS MP3 encoder (~100KB, no FFmpeg needed) -->
+  <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+  <!-- Main app: WaveSurfer + RegionsPlugin imported as ES modules inside app.js -->
+  <script type="module" src="app.js?v=1.4"></script>
+</body>
+</html>
