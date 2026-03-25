@@ -356,10 +356,26 @@ async function exportWma(buffer) {
   if (saved) setStatus('✅ WMA 匯出成功');
 }
 
-// ─── Vocal Removal (Pure PCM Mid-Side subtraction) ───────────────────
-// Performs L-R (side channel) extraction directly on PCM samples.
-// No Web Audio filter chains = no phase distortion, no frequency artifacts.
-// The side signal preserves the full stereo accompaniment at full bit-depth.
+// ─── Vocal Removal ────────────────────────────────────────────────────
+//
+// Uses standard Mid-Side (karaoke) technique:
+//   Mid  = (L + R) * 0.5  ← centre content (vocals, bass drum centre hits)
+//   Side = (L - R) * 0.5  ← stereo-difference content (instruments, reverb)
+//
+// Output sample = Side * strength + Mid * (1 - strength)
+//   strength=1.0 → pure Side (vocals removed as much as possible)
+//   strength=0.0 → pure Mid  (original mono centre)
+//   In between   → smooth blend
+//
+// MONO-COMPATIBLE OUTPUT (critical for Bluetooth headphones):
+//   Both output channels carry the SAME value.
+//   If a BT device sums L+R to mono, it doubles instead of cancelling.
+//   The "true stereo" approach (outL=+side, outR=-side) cancels to zero
+//   in mono — that is why the user heard silence.
+//
+// PEAK NORMALISATION:
+//   After processing, scan for the maximum amplitude and scale to 0.95
+//   so the signal is loud and clear without clipping on export.
 async function removeVocals(buffer, strength = 1.0) {
   if (buffer.numberOfChannels < 2) {
     setStatus('⚠ 人聲去除需要立體聲（Stereo）檔案，此音軌為單聲道，已保留原音');
@@ -373,33 +389,35 @@ async function removeVocals(buffer, strength = 1.0) {
   const L = buffer.getChannelData(0);
   const R = buffer.getChannelData(1);
 
-  // Output: stereo buffer (same Side signal on both channels for mono-compat)
-  const out    = ctx.createBuffer(2, len, sr);
-  const outL   = out.getChannelData(0);
-  const outR   = out.getChannelData(1);
+  // Temporary float array (process into this, then normalise)
+  const tmp = new Float32Array(len);
 
-  // Process in chunks to avoid blocking the UI thread
+  // ── Pass 1: compute output samples & track peak ──────────────────────
+  let peak = 0;
   const CHUNK = 65536;
   for (let i = 0; i < len; i += CHUNK) {
     const end = Math.min(i + CHUNK, len);
     for (let j = i; j < end; j++) {
-      // Mid-Side: Mid = (L+R)/2  Side = (L-R)/2
-      // Full Mid-Side subtraction at `strength`, blend back at lower values
       const mid  = (L[j] + R[j]) * 0.5;
       const side = (L[j] - R[j]) * 0.5;
-
-      // Accompaniment = original - (strength * mid_component)
-      // At strength=1: pure side channel (vocals cancelled)
-      // At strength=0: original stereo untouched
-      const accompanimentL = L[j] - strength * mid;
-      const accompanimentR = R[j] - strength * mid;
-
-      // Output the same blended signal on both channels (mono-compatible)
-      outL[j] = (accompanimentL + accompanimentR) * 0.5;
-      outR[j] = outL[j];
+      // Blend side (accompaniment) and mid according to strength
+      const s = side * strength + mid * (1.0 - strength);
+      tmp[j] = s;
+      const abs = s < 0 ? -s : s;
+      if (abs > peak) peak = abs;
     }
-    // Yield to UI every chunk
-    if (i % (CHUNK * 4) === 0) await new Promise(r => setTimeout(r, 0));
+    if (((i / CHUNK) % 4) === 0) await new Promise(r => setTimeout(r, 0));
+  }
+
+  // ── Pass 2: normalise to 0.95 and write stereo output ────────────────
+  const gain = peak > 0.001 ? 0.95 / peak : 1.0;
+  const out  = ctx.createBuffer(2, len, sr);
+  const outL = out.getChannelData(0);
+  const outR = out.getChannelData(1);
+  for (let j = 0; j < len; j++) {
+    const v = tmp[j] * gain;
+    outL[j] = v;   // Same value on both channels → mono-compatible
+    outR[j] = v;   // BT headphones sum L+R → doubles (loud & clear, not silent)
   }
 
   return out;
